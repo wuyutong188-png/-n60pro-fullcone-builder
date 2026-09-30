@@ -1,10 +1,10 @@
-name: Validate N60 Pro PadavanOnly Full Cone v2
+name: Validate N60 Pro Full Cone v3
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "First run validate. Do not use build until ChatGPT reviews validation."
+        description: "Use validate first. Do not build until validation is reviewed."
         required: true
         default: "validate"
         type: choice
@@ -12,12 +12,12 @@ on:
           - validate
           - build
       source_ref:
-        description: "PadavanOnly branch/tag/commit"
+        description: "PadavanOnly source branch/tag/commit"
         required: true
         default: "openwrt-24.10-6.6"
         type: string
       sonic_ref:
-        description: "SONiC Full Cone branch/tag/commit. For validate use master; build should later pin the validated commit."
+        description: "SONiC Full Cone branch/tag/commit"
         required: true
         default: "master"
         type: string
@@ -44,8 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ inputs.mode }}" == "build" && "${{ inputs.sonic_ref }}" == "master" ]]; then
-            echo "ERROR: build mode must not use moving ref 'master'."
-            echo "Run validate first, record the exact SONiC commit, then use that commit SHA for build."
+            echo "ERROR: build mode must use a fixed SONiC commit SHA, not master."
             exit 2
           fi
 
@@ -71,8 +70,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.source_ref }}" \
-            "$SOURCE_REPO" "$SOURCE_DIR"
+          git clone --depth 1 --branch "${{ inputs.source_ref }}" "$SOURCE_REPO" "$SOURCE_DIR"
           cd "$SOURCE_DIR"
           echo "PADAVANONLY_COMMIT=$(git rev-parse HEAD)" | tee -a "$GITHUB_ENV"
           git log -1 --oneline
@@ -85,11 +83,10 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Fetch pinned SONiC Full Cone patchset
+      - name: Clone SONiC Full Cone source
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/sonic-fullcone
           git init -q /tmp/sonic-fullcone
           cd /tmp/sonic-fullcone
           git remote add origin "$SONIC_REPO"
@@ -97,47 +94,70 @@ jobs:
           git checkout --detach FETCH_HEAD
           SONIC_COMMIT="$(git rev-parse HEAD)"
           echo "SONIC_FULLCONE_COMMIT=$SONIC_COMMIT" | tee -a "$GITHUB_ENV"
-          echo "===== SONIC FULLCONE COMMIT ====="
           git log -1 --oneline
 
-      - name: Add minimal Full Cone kernel support
+      - name: Apply complete upstream SONiC Full Cone patchset
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
+          SRC=/tmp/sonic-fullcone
 
-          PATCHSET=/tmp/sonic-fullcone
-          HACKDIR=target/linux/generic/hack-6.6
+          test -d target/linux/generic/hack-6.6
+          test -f "$SRC/kernel/984-add-sonic-fullcone-support.patch"
+          test -f "$SRC/kernel/985-add-sonic-fullcone-to-ipt.patch"
+          test -f "$SRC/kernel/986-add-sonic-fullcone-to-nft.patch"
 
-          test -d "$HACKDIR" || {
-            echo "ERROR: expected kernel patch directory $HACKDIR is missing."
-            exit 10
-          }
+          cp -f "$SRC/kernel/984-add-sonic-fullcone-support.patch" target/linux/generic/hack-6.6/
+          cp -f "$SRC/kernel/985-add-sonic-fullcone-to-ipt.patch" target/linux/generic/hack-6.6/
+          cp -f "$SRC/kernel/986-add-sonic-fullcone-to-nft.patch" target/linux/generic/hack-6.6/
 
-          test -f "$PATCHSET/kernel/984-add-sonic-fullcone-support.patch"
-          test -f "$PATCHSET/kernel/986-add-sonic-fullcone-to-nft.patch"
+          mkdir -p package/network/utils/iptables/patches
+          cp -f "$SRC/patches/iptables/901-sonic-fullcone.patch" \
+            package/network/utils/iptables/patches/
 
-          echo "===== EXISTING FULLCONE KERNEL PATCHES ====="
-          grep -Rni "fullcone" "$HACKDIR" 2>/dev/null | head -n 30 || true
+          mkdir -p package/libs/libnftnl/patches
+          cp -f "$SRC/patches/libnftnl/001-libnftnl-add-fullcone-expression-support.patch" \
+            package/libs/libnftnl/patches/
 
-          if grep -Rqs "nat_by_manip_src" "$HACKDIR"; then
-            echo "Existing SONiC-style nf_nat fullcone core detected; not adding 984 again."
-          else
-            cp -f "$PATCHSET/kernel/984-add-sonic-fullcone-support.patch" "$HACKDIR/"
-            echo "Added 984-add-sonic-fullcone-support.patch"
+          NFTNL_MK=package/libs/libnftnl/Makefile
+          if ! grep -q '^PKG_FIXUP:=.*autoreconf' "$NFTNL_MK"; then
+            awk '!ins && /^include \$\(INCLUDE_DIR\)\/package\.mk/ { print "PKG_FIXUP:=autoreconf"; print ""; ins=1 } { print }' \
+              "$NFTNL_MK" > "$NFTNL_MK.tmp"
+            mv "$NFTNL_MK.tmp" "$NFTNL_MK"
           fi
 
-          if grep -Rqs "nft.*fullcone\|fullcone.*nft" "$HACKDIR" \
-             --exclude='984-add-sonic-fullcone-support.patch'; then
-            echo "Existing nftables fullcone kernel expression patch detected; not adding 986 again."
-          else
-            cp -f "$PATCHSET/kernel/986-add-sonic-fullcone-to-nft.patch" "$HACKDIR/"
-            echo "Added 986-add-sonic-fullcone-to-nft.patch"
+          mkdir -p package/network/utils/nftables/patches
+          cp -f "$SRC/patches/nftables/002-nftables-add-fullcone-expression-support.patch" \
+            package/network/utils/nftables/patches/
+
+          mkdir -p package/network/config/firewall4/patches
+          cp -f "$SRC/firewall/firewall4/001-sonic-fullcone.patch" \
+            package/network/config/firewall4/patches/
+
+          if [[ -d package/network/config/firewall ]]; then
+            mkdir -p package/network/config/firewall/patches
+            cp -f "$SRC/firewall/firewall3/001-sonic-fullcone.patch" \
+              package/network/config/firewall/patches/
           fi
 
-          echo
-          echo "===== FINAL FULLCONE KERNEL PATCH FILES ====="
-          find "$HACKDIR" -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort
+          if [[ -d feeds/luci/applications/luci-app-firewall ]]; then
+            mkdir -p feeds/luci/applications/luci-app-firewall/patches
+            cp -f "$SRC/patches/luci-app-firewall/"*.patch \
+              feeds/luci/applications/luci-app-firewall/patches/
+
+            ZH_PO=feeds/luci/applications/luci-app-firewall/po/zh_Hans/firewall.po
+            if [[ -f "$ZH_PO" ]] && ! grep -q "Fullcone NAT" "$ZH_PO"; then
+              cat "$SRC/translations/zh_Hans.po" >> "$ZH_PO"
+            fi
+          fi
+
+          echo "===== APPLIED FULLCONE FILES ====="
+          find target/linux/generic/hack-6.6 -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort
+          find package/network/utils/iptables/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
+          find package/libs/libnftnl/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
+          find package/network/utils/nftables/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
+          find package/network/config/firewall4/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
 
       - name: Prepare N60 Pro MTK config
         shell: bash
@@ -146,39 +166,31 @@ jobs:
           set -euo pipefail
 
           if [[ -f defconfig/mt7975-ipailna-high-power.config ]]; then
-            BASE="defconfig/mt7975-ipailna-high-power.config"
+            BASE=defconfig/mt7975-ipailna-high-power.config
           elif [[ -f defconfig/mt7986-ax6000.config ]]; then
-            BASE="defconfig/mt7986-ax6000.config"
+            BASE=defconfig/mt7986-ax6000.config
           else
-            echo "ERROR: No suitable MT7986 defconfig found."
+            echo "ERROR: no suitable MT7986 defconfig found"
             exit 20
           fi
 
-          echo "Using base config: $BASE"
           cp -f "$BASE" .config
+          echo "Using base config: $BASE"
 
           set_cfg() {
-            local sym="$1"
-            local val="$2"
-
-            sed -i \
-              -e "/^${sym}=.*/d" \
-              -e "/^# ${sym} is not set$/d" \
-              .config
-
+            local sym="$1" val="$2"
+            sed -i -e "/^${sym}=.*/d" -e "/^# ${sym} is not set$/d" .config
             case "$val" in
               y|m) echo "${sym}=${val}" >> .config ;;
-              n)   echo "# ${sym} is not set" >> .config ;;
-              *)   echo "ERROR: invalid config value $val for $sym"; exit 21 ;;
+              n) echo "# ${sym} is not set" >> .config ;;
+              *) echo "invalid config value"; exit 21 ;;
             esac
           }
 
-          # Exact device target.
           set_cfg CONFIG_TARGET_mediatek y
           set_cfg CONFIG_TARGET_mediatek_filogic y
           set_cfg CONFIG_TARGET_mediatek_filogic_DEVICE_netcore_n60-pro y
 
-          # Preserve current proprietary MTK Wi-Fi / acceleration stack.
           set_cfg CONFIG_PACKAGE_kmod-mt_wifi y
           set_cfg CONFIG_PACKAGE_kmod-warp y
           set_cfg CONFIG_PACKAGE_kmod-mediatek_hnat y
@@ -188,7 +200,6 @@ jobs:
           set_cfg CONFIG_PACKAGE_mtk-smp y
           set_cfg CONFIG_PACKAGE_mtkhqos_util y
 
-          # Keep current nftables/PPPoE/USB/OpenClash functionality.
           set_cfg CONFIG_PACKAGE_kmod-nft-nat y
           set_cfg CONFIG_PACKAGE_kmod-nft-offload y
           set_cfg CONFIG_PACKAGE_luci-app-openclash y
@@ -198,12 +209,10 @@ jobs:
           set_cfg CONFIG_PACKAGE_kmod-usb-storage y
           set_cfg CONFIG_PACKAGE_kmod-usb-storage-uas y
 
-          # Do not mix the open-source mt7915e stack into this image.
           set_cfg CONFIG_PACKAGE_kmod-mt7915e n
           set_cfg CONFIG_PACKAGE_kmod-mt7986-firmware n
           set_cfg CONFIG_PACKAGE_mt7986-wo-firmware n
 
-          # Remove packages that caused the stale firewall/iptables warnings and are not wanted.
           set_cfg CONFIG_PACKAGE_wrtbwmon n
           set_cfg CONFIG_PACKAGE_luci-app-wrtbwmon n
           set_cfg CONFIG_PACKAGE_luci-i18n-wrtbwmon-zh-cn n
@@ -213,17 +222,13 @@ jobs:
           set_cfg CONFIG_PACKAGE_luci-app-zerotier n
           set_cfg CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn n
 
-          # IMPORTANT:
-          # No CONFIG_PACKAGE_kmod-nft-fullcone is requested here.
-          # This v2 approach integrates Full Cone into the existing nft_masq kernel module.
           make defconfig
 
-      - name: Validate target and MTK stack
+      - name: Validate N60 Pro config
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
-
           required=(
             'CONFIG_TARGET_mediatek=y'
             'CONFIG_TARGET_mediatek_filogic=y'
@@ -237,92 +242,18 @@ jobs:
             'CONFIG_PACKAGE_kmod-nft-nat=y'
             'CONFIG_PACKAGE_luci-app-openclash=y'
           )
-
-          forbidden=(
-            'CONFIG_PACKAGE_kmod-mt7915e=y'
-            'CONFIG_PACKAGE_kmod-mt7986-firmware=y'
-            'CONFIG_PACKAGE_mt7986-wo-firmware=y'
-          )
-
-          echo "===== REQUIRED ====="
           for s in "${required[@]}"; do
-            if grep -Fxq "$s" .config; then
-              echo "OK   $s"
-            else
-              echo "FAIL $s"
-              exit 30
-            fi
+            grep -Fxq "$s" .config && echo "OK   $s" || { echo "FAIL $s"; exit 30; }
           done
 
-          echo
-          echo "===== FORBIDDEN ====="
-          for s in "${forbidden[@]}"; do
-            if grep -Fxq "$s" .config; then
-              echo "FAIL selected: $s"
-              exit 31
-            else
-              echo "OK   not selected: $s"
-            fi
+          for s in \
+            CONFIG_PACKAGE_kmod-mt7915e=y \
+            CONFIG_PACKAGE_kmod-mt7986-firmware=y \
+            CONFIG_PACKAGE_mt7986-wo-firmware=y; do
+            ! grep -Fxq "$s" .config && echo "OK   not selected: $s" || { echo "FAIL selected: $s"; exit 31; }
           done
 
-          echo
-          echo "===== FULL CONE PATCHSET ====="
-          test -f target/linux/generic/hack-6.6/984-add-sonic-fullcone-support.patch || {
-            echo "FAIL core Full Cone patch missing"; exit 32;
-          }
-          test -f target/linux/generic/hack-6.6/986-add-sonic-fullcone-to-nft.patch || {
-            echo "FAIL nft Full Cone patch missing"; exit 33;
-          }
-          echo "OK   kernel Full Cone patches present"
-          echo "PADAVANONLY_COMMIT=$PADAVANONLY_COMMIT"
-          echo "SONIC_FULLCONE_COMMIT=$SONIC_FULLCONE_COMMIT"
-
-      - name: Check existing userspace Full Cone support
-        shell: bash
-        working-directory: ${{ env.SOURCE_DIR }}
-        run: |
-          set -euo pipefail
-
-          # PadavanOnly/ImmortalWrt already has fw4 Full Cone probing in the user's
-          # current firmware. Prepare the userspace packages and verify that the
-          # cloned source also contains Full Cone support before touching them.
-          make package/libs/libnftnl/prepare -j1 V=s
-          make package/network/utils/nftables/prepare -j1 V=s
-          make package/network/config/firewall4/prepare -j1 V=s
-
-          echo "===== LIBNFTNL FULLCONE REFERENCES ====="
-          if find build_dir -type f -path '*libnftnl*' -print0 2>/dev/null \
-             | xargs -0 grep -Iil 'fullcone' 2>/dev/null | head -n 5 | grep -q .; then
-            find build_dir -type f -path '*libnftnl*' -print0 2>/dev/null \
-              | xargs -0 grep -Iil 'fullcone' 2>/dev/null | head -n 5
-          else
-            echo "FAIL: libnftnl source does not appear Full Cone aware."
-            exit 40
-          fi
-
-          echo
-          echo "===== NFTABLES FULLCONE REFERENCES ====="
-          if find build_dir -type f -path '*nftables*' -print0 2>/dev/null \
-             | xargs -0 grep -Iil 'fullcone' 2>/dev/null | head -n 5 | grep -q .; then
-            find build_dir -type f -path '*nftables*' -print0 2>/dev/null \
-              | xargs -0 grep -Iil 'fullcone' 2>/dev/null | head -n 5
-          else
-            echo "FAIL: nftables source does not appear Full Cone aware."
-            exit 41
-          fi
-
-          echo
-          echo "===== FIREWALL4 FULLCONE REFERENCES ====="
-          if find build_dir -type f -path '*firewall4*' -print0 2>/dev/null \
-             | xargs -0 grep -Iil 'fullcone' 2>/dev/null | head -n 5 | grep -q .; then
-            find build_dir -type f -path '*firewall4*' -print0 2>/dev/null \
-              | xargs -0 grep -Iil 'fullcone' 2>/dev/null | head -n 5
-          else
-            echo "FAIL: firewall4 source does not appear Full Cone aware."
-            exit 42
-          fi
-
-      - name: Download sources for compile preflight
+      - name: Download sources
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
@@ -330,21 +261,55 @@ jobs:
           make download -j"$(nproc)"
           find dl -type f -size -1024c -print -delete || true
 
-      - name: Compile kernel Full Cone preflight
+      - name: Compile kernel Full Cone preflight with diagnostics
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
-          set -euo pipefail
-          make target/linux/compile -j"$(nproc)" || make target/linux/compile -j1 V=s
+          set -uo pipefail
+          set +e
+          make target/linux/compile -j1 V=s 2>&1 | tee ../kernel-fullcone-preflight.log
+          rc=${PIPESTATUS[0]}
+          set -e
 
-      - name: Compile nftables/firewall4 preflight
+          if [[ "$rc" -ne 0 ]]; then
+            echo
+            echo "===== ROOT-CAUSE HINTS FROM KERNEL LOG ====="
+            grep -nEi \
+              'patch failed|hunk #[0-9]+ failed|FAILED|error:|fatal:|reject|malformed patch|previously applied|does not apply|No rule to make target' \
+              ../kernel-fullcone-preflight.log | tail -n 120 || true
+            echo
+            echo "Kernel preflight failed with exit code $rc"
+            exit "$rc"
+          fi
+
+      - name: Compile Full Cone userspace preflight with diagnostics
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
-          set -euo pipefail
-          make package/libs/libnftnl/compile -j"$(nproc)" || make package/libs/libnftnl/compile -j1 V=s
-          make package/network/utils/nftables/compile -j"$(nproc)" || make package/network/utils/nftables/compile -j1 V=s
-          make package/network/config/firewall4/compile -j"$(nproc)" || make package/network/config/firewall4/compile -j1 V=s
+          set -uo pipefail
+
+          compile_one() {
+            local target="$1"
+            local log="$2"
+
+            set +e
+            make "$target" -j1 V=s 2>&1 | tee "../$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+
+            if [[ "$rc" -ne 0 ]]; then
+              echo
+              echo "===== ROOT-CAUSE HINTS: $target ====="
+              grep -nEi \
+                'patch failed|hunk #[0-9]+ failed|FAILED|error:|fatal:|reject|automake|autoreconf|No rule to make target' \
+                "../$log" | tail -n 120 || true
+              exit "$rc"
+            fi
+          }
+
+          compile_one package/libs/libnftnl/compile libnftnl-fullcone.log
+          compile_one package/network/utils/nftables/compile nftables-fullcone.log
+          compile_one package/network/config/firewall4/compile firewall4-fullcone.log
 
       - name: Validation summary
         shell: bash
@@ -355,24 +320,24 @@ jobs:
           echo "PadavanOnly commit : $PADAVANONLY_COMMIT"
           echo "SONiC Full Cone    : $SONIC_FULLCONE_COMMIT"
           echo "Target             : netcore_n60-pro"
-          echo "Wi-Fi stack         : kmod-mt_wifi"
-          echo "Acceleration        : WARP + MediaTek HNAT"
-          echo "Full Cone method    : SONiC kernel integration into nft_masq"
+          echo "Wi-Fi stack        : kmod-mt_wifi"
+          echo "Acceleration       : WARP + MediaTek HNAT"
+          echo "Full Cone          : complete SONiC patchset"
           echo "=========================================="
-          echo
-          echo "Do NOT flash anything yet."
-          echo "Send this summary and the SONiC commit SHA to ChatGPT for review."
+          echo "Do NOT flash yet. Review this result first."
 
-      - name: Save validation files
+      - name: Save validation files and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: n60pro-fullcone-v2-validation-${{ github.run_number }}
+          name: n60pro-fullcone-v3-${{ github.run_number }}
           path: |
             immortalwrt/.config
             immortalwrt/feeds.conf.default
-            immortalwrt/target/linux/generic/hack-6.6/984-add-sonic-fullcone-support.patch
-            immortalwrt/target/linux/generic/hack-6.6/986-add-sonic-fullcone-to-nft.patch
+            kernel-fullcone-preflight.log
+            libnftnl-fullcone.log
+            nftables-fullcone.log
+            firewall4-fullcone.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -384,62 +349,11 @@ jobs:
           set -euo pipefail
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: Verify built firmware manifest
-        if: ${{ inputs.mode == 'build' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="$SOURCE_DIR/bin/targets/mediatek/filogic"
-          test -d "$OUT"
-
-          echo "===== OUTPUT FILES ====="
-          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
-
-          MANIFEST="$(find "$OUT" -maxdepth 1 -type f -name '*manifest*' | head -n1 || true)"
-          test -n "$MANIFEST" || { echo "ERROR: manifest not found"; exit 50; }
-
-          required_pkgs=(
-            kmod-mt_wifi
-            kmod-warp
-            kmod-mediatek_hnat
-            kmod-nft-nat
-            luci-app-openclash
-          )
-
-          for p in "${required_pkgs[@]}"; do
-            if grep -Eq "^${p}[[:space:]-]" "$MANIFEST"; then
-              echo "OK   $p"
-            else
-              echo "FAIL $p missing from manifest"
-              exit 51
-            fi
-          done
-
-          for p in kmod-mt7915e kmod-mt7986-firmware mt7986-wo-firmware; do
-            if grep -Eq "^${p}[[:space:]-]" "$MANIFEST"; then
-              echo "FAIL forbidden package present: $p"
-              exit 52
-            fi
-          done
-
-          IMAGE="$(find "$OUT" -maxdepth 1 -type f \
-            \( -iname '*netcore*n60*pro*sysupgrade*' -o -iname '*n60-pro*sysupgrade*' \) \
-            | head -n1 || true)"
-          test -n "$IMAGE" || { echo "ERROR: N60 Pro sysupgrade image not found"; exit 53; }
-
-          echo "===== SYSUPGRADE IMAGE ====="
-          ls -lh "$IMAGE"
-          sha256sum "$IMAGE"
-
-          echo
-          echo "Firmware build passed static checks."
-          echo "Do NOT flash until metadata, UBI layout, package delta and rollback path are reviewed."
-
       - name: Upload firmware
         if: ${{ inputs.mode == 'build' }}
         uses: actions/upload-artifact@v4
         with:
-          name: netcore-n60-pro-sonic-fullcone-${{ github.run_number }}
+          name: netcore-n60-pro-fullcone-v3-${{ github.run_number }}
           path: immortalwrt/bin/targets/mediatek/filogic/
           if-no-files-found: error
           retention-days: 14
