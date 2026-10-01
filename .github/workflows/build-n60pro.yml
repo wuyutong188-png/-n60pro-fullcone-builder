@@ -372,7 +372,8 @@ jobs:
             echo "===== FIREWALL4 PREPARED SOURCE ====="
             echo "$FW4_DIR"
             echo "===== ZONE TEMPLATE RANGE RULE ====="
-            grep -nF 'fullcone to :1024-65535' "$ZONE"
+            grep -nF 'let snat_range = "1024-65535";' "$ZONE"
+            grep -nF 'fullcone to :{{ snat_range }}' "$ZONE"
             echo "===== RUNTIME PROBE RANGE RULE ====="
             grep -nF 'fullcone to :1024-65535' "$FW4UC"
           } | tee ../fw4-range-compat.log
