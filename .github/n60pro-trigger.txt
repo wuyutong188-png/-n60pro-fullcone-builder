@@ -1,0 +1,8 @@
+# N60 Pro validation trigger
+#
+# Changing this file on main starts the N60 Pro SONiC Full Cone workflow
+# in VALIDATE mode only, using the pinned tested commits.
+#
+# Formal firmware BUILD remains manual via workflow_dispatch.
+#
+# Trigger generation: 1
