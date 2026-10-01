@@ -36,7 +36,8 @@ env:
   SONIC_REPO: https://github.com/mufeng05/openwrt-sonic-fullcone.git
   PINNED_SOURCE_REF: ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8
   PINNED_SONIC_REF: 4de0643f6b48e7e7d57d768144204ce5d3078c8f
-  RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'validate' }}
+  PUSH_BUILD_APPROVED: ${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Trigger approved N60 Pro build') && '1' || '0' }}
+  RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Trigger approved N60 Pro build') && 'build' || 'validate') }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || 'ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8' }}
   SONIC_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.sonic_ref || '4de0643f6b48e7e7d57d768144204ce5d3078c8f' }}
 
@@ -58,8 +59,13 @@ jobs:
           echo "Effective PadavanOnly ref: $SOURCE_REF"
           echo "Effective SONiC ref: $SONIC_REF"
 
-          if [[ "$GITHUB_EVENT_NAME" == "push" && "$RUN_MODE" != "validate" ]]; then
-            echo "ERROR: file-triggered runs are restricted to validate mode."
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$RUN_MODE" == "build" && "$PUSH_BUILD_APPROVED" != "1" ]]; then
+            echo "ERROR: push-triggered build requires an explicit approved build trigger commit."
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$RUN_MODE" != "validate" && "$RUN_MODE" != "build" ]]; then
+            echo "ERROR: unsupported push-triggered mode: $RUN_MODE"
             exit 1
           fi
 
