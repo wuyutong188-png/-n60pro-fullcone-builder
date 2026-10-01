@@ -163,43 +163,9 @@ jobs:
             package/network/utils/nftables/patches/
 
           # PadavanOnly already carries its own firewall4 Full Cone integration.
-          # Keep that integration, but make its SNAT rule use SONiC's required
-          # port range so the kernel enters NF_NAT_RANGE_PROTO_SPECIFIED and
-          # enforces translated 3-tuple uniqueness (EIM).
-          cat > package/network/config/firewall4/patches/003-sonic-fullcone-range-compat.patch <<'PATCH'
---- a/root/usr/share/firewall4/templates/zone-fullcone.uc
-+++ b/root/usr/share/firewall4/templates/zone-fullcone.uc
-@@ -1,4 +1,15 @@
--{# /usr/share/firewall4/templates/zone-fullcone.uc #}
--		meta nfproto {{ fw4.nfproto(family) }} fullcone comment "!fw4: Handle {{
--		zone.name
--}} {{ fw4.nfproto(family, true) }} fullcone NAT {{ direction }} traffic"
-+{# /usr/share/firewall4/templates/zone-fullcone.uc
-+   PadavanOnly compatibility: keep its global enable model while using
-+   SONiC's required SNAT port range for protocols with a port/id/key.
-+ -#}
-+{%
-+	let snat_range = "1024-65535";
-+	let l4 = (name) => fw4.l4proto(family, { name });
-+	let keyed = map([ "tcp", "udp", "sctp", "dccp", "udplite", "icmp", "gre" ], l4);
-+	let label = `${zone.name} ${fw4.nfproto(family, true)} fullcone`;
-+-%}
-+{% if (direction == "srcnat"): -%}
-+meta nfproto {{ fw4.nfproto(family) }} meta l4proto {{ "{ " + join(", ", keyed) + " }" }} fullcone to :{{ snat_range }} comment "!fw4: {{ label }} NAT srcnat"
-+		meta nfproto {{ fw4.nfproto(family) }} fullcone comment "!fw4: {{ label }} NAT srcnat, other protocols"
-+{% else -%}
-+meta nfproto {{ fw4.nfproto(family) }} fullcone comment "!fw4: {{ label }} NAT {{ direction }}"
-+{% endif -%}
---- a/root/usr/share/ucode/fw4.uc
-+++ b/root/usr/share/ucode/fw4.uc
-@@ -501,6 +501,7 @@ function nft_try_fullcone() {
- 		'add chain inet fw4-fullcone-test srcnat { ' +
- 			'type nat hook postrouting priority -100; policy accept; ' +
-+			'meta l4proto { tcp, udp } fullcone to :1024-65535; ' +
- 			'fullcone; ' +
- 		'}; ';
- 	let cmd = sprintf("/usr/sbin/nft -c '%s' 2>/dev/null", replace(nft_test, "'", "'\\''"));
-PATCH
+          # Install our compatibility patch from this builder repository.
+          install -D -m 0644 "$GITHUB_WORKSPACE/.github/patches/003-sonic-fullcone-range-compat.patch" \
+            package/network/config/firewall4/patches/003-sonic-fullcone-range-compat.patch
 
           if [[ -d package/network/config/firewall ]]; then
             mkdir -p package/network/config/firewall/patches
