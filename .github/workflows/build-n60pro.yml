@@ -252,7 +252,29 @@ jobs:
             CONFIG_PACKAGE_mt7986-wo-firmware=y; do
             ! grep -Fxq "$s" .config && echo "OK   not selected: $s" || { echo "FAIL selected: $s"; exit 31; }
           done
+     
+      - name: Build OpenWrt host tools and toolchain
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
 
+          echo "===== BUILD HOST TOOLS ====="
+          make tools/install -j"$(nproc)" || make tools/install -j1 V=s
+
+          echo "===== BUILD TOOLCHAIN ====="
+          make toolchain/install -j"$(nproc)" || make toolchain/install -j1 V=s
+
+          echo "===== VERIFY HOST M4 ====="
+          test -x staging_dir/host/bin/m4
+          ls -l staging_dir/host/bin/m4
+          staging_dir/host/bin/m4 --version
+
+          echo "===== VERIFY TOOLCHAIN ====="
+          GCC_BIN="$(find staging_dir/toolchain-* -maxdepth 2 -type f -name '*gcc' -print -quit)"
+          test -n "$GCC_BIN"
+          echo "$GCC_BIN"
+     
       - name: Download sources
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
