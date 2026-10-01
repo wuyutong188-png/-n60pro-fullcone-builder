@@ -316,6 +316,13 @@ jobs:
           PY
 
           # Re-resolve config after dropping the legacy dependency.
+          for sym in \
+            CONFIG_PACKAGE_kmod-ipt-fullconenat \
+            CONFIG_PACKAGE_iptables-mod-fullconenat \
+            CONFIG_PACKAGE_ip6tables-mod-fullconenat; do
+            sed -i -e "/^${sym}=.*/d" -e "/^# ${sym} is not set$/d" .config
+            echo "# ${sym} is not set" >> .config
+          done
           make defconfig
 
       - name: Validate N60 Pro config
