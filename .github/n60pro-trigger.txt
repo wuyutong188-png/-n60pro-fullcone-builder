@@ -5,6 +5,8 @@
 #
 # Formal firmware BUILD remains manual via workflow_dispatch.
 #
-# Trigger generation: 4
+# Trigger generation: 5
 
 # Approved firmware build trigger: 4
+
+# v5 minimal OpenClash validation trigger: 5
