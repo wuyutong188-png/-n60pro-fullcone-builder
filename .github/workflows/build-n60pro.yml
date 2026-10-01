@@ -398,6 +398,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: n60pro-fullcone-v4-${{ github.run_number }}
+          # Explicit paths only: retain the build .config for later review.
+          include-hidden-files: true
           path: |
             immortalwrt/.config
             immortalwrt/feeds.conf.default
@@ -427,14 +429,12 @@ jobs:
           OUT=bin/targets/mediatek/filogic
           test -d "$OUT"
 
+          bash "$GITHUB_WORKSPACE/scripts/verify-image.sh" "$PWD"
+
           echo "===== BUILD OUTPUT ====="
           find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
 
-          IMAGE="$(find "$OUT" -maxdepth 1 -type f | grep -Ei 'netcore[-_]?n60[-_]?pro.*sysupgrade' | head -n 1 || true)"
-          test -n "$IMAGE" || {
-            echo "ERROR: Netcore N60 Pro sysupgrade image not found."
-            exit 50
-          }
+          IMAGE="$OUT/immortalwrt-mediatek-filogic-netcore_n60-pro-squashfs-sysupgrade.bin"
 
           {
             echo "PadavanOnly commit: $PADAVANONLY_COMMIT"
