@@ -1,4 +1,4 @@
-name: N60 Pro SONiC Full Cone v4
+name: N60 Pro SONiC Full Cone v5
 
 on:
   workflow_dispatch:
@@ -223,7 +223,10 @@ jobs:
 
           set_cfg CONFIG_PACKAGE_kmod-nft-nat y
           set_cfg CONFIG_PACKAGE_kmod-nft-offload y
+          set_cfg CONFIG_PACKAGE_iptables-nft y
           set_cfg CONFIG_PACKAGE_luci-app-openclash y
+          set_cfg CONFIG_PACKAGE_luci-theme-argon y
+          set_cfg CONFIG_PACKAGE_luci-app-argon-config y
           set_cfg CONFIG_PACKAGE_kmod-pppoe y
           set_cfg CONFIG_PACKAGE_ppp-mod-pppoe y
           set_cfg CONFIG_PACKAGE_kmod-usb3 y
@@ -233,6 +236,9 @@ jobs:
           set_cfg CONFIG_PACKAGE_kmod-mt7915e n
           set_cfg CONFIG_PACKAGE_kmod-mt7986-firmware n
           set_cfg CONFIG_PACKAGE_mt7986-wo-firmware n
+          set_cfg CONFIG_PACKAGE_kmod-ipt-fullconenat n
+          set_cfg CONFIG_PACKAGE_iptables-mod-fullconenat n
+          set_cfg CONFIG_PACKAGE_ip6tables-mod-fullconenat n
 
           set_cfg CONFIG_PACKAGE_wrtbwmon n
           set_cfg CONFIG_PACKAGE_luci-app-wrtbwmon n
@@ -243,6 +249,73 @@ jobs:
           set_cfg CONFIG_PACKAGE_luci-app-zerotier n
           set_cfg CONFIG_PACKAGE_luci-i18n-zerotier-zh-cn n
 
+          make defconfig
+
+      - name: Decouple TurboACC from legacy FULLCONENAT
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f"Expected text not found in {path}: {old!r}")
+              p.write_text(s.replace(old, new, 1))
+
+          replace_exact(
+              "package/mtk/applications/luci-app-turboacc-mtk/Makefile",
+              "\t+kmod-ipt-fullconenat +kmod-fs-btrfs +luci-app-ttyd +kmod-bonding \\\n",
+              "\t+kmod-fs-btrfs +luci-app-ttyd +kmod-bonding \\\n",
+          )
+
+          replace_exact(
+              "package/mtk/applications/luci-app-turboacc-mtk/root/etc/init.d/turboacc",
+              '''\n\tlocal fullcone\n\tconfig_get "fullcone" "config" "fullcone" "2"\n\techo "$fullcone" > /proc/sys/net/netfilter/nf_conntrack_nat_mode\n''',
+              "\n",
+          )
+
+          replace_exact(
+              "package/mtk/applications/luci-app-turboacc-mtk/root/etc/uci-defaults/turboacc",
+              '\nuci -q set "turboacc.config.fullcone"="2"\n',
+              "\n",
+          )
+
+          js = Path("package/mtk/applications/luci-app-turboacc-mtk/htdocs/luci-static/resources/view/turboacc.js")
+          s = js.read_text()
+          replacements = [
+              ("""var getFullConeStat = rpc.declare({\n\tobject: 'luci.turboacc',\n\tmethod: 'getFullConeStat',\n\texpect: { '': {} }\n});\n\n""", ""),
+              ("""\t\tL.resolveDefault(getFastPathStat(), {}),\n\t\tL.resolveDefault(getFullConeStat(), {}),\n\t\tL.resolveDefault(getTCPCCAStat(), {})\n""",
+               """\t\tL.resolveDefault(getFastPathStat(), {}),\n\t\tL.resolveDefault(getTCPCCAStat(), {})\n"""),
+              ("""\t\t\t\tvar tds = [ 'fastpath_state', 'fullcone_state', 'tcpcca_state' ];\n""",
+               """\t\t\t\tvar tds = [ 'fastpath_state', 'tcpcca_state' ];\n"""),
+              ("""\t\t\t\tE('tr', {}, [\n\t\t\t\t\tE('td', { 'width': '33%' }, _('Full Cone NAT')),\n\t\t\t\t\tE('td', { 'id': 'fullcone_state' }, E('em', {}, _('Collecting data...')))\n\t\t\t\t]),\n""", ""),
+              ("""\n\t\to = s.option(form.ListValue, 'fullcone', _('Full cone NAT'),\n\t\t\t_('Full cone NAT (NAT1) can improve gaming performance effectively.'));\n\t\to.value('0', _('Disable'))\n\t\to.value('2', _('Boardcom_FULLCONE_NAT'));\n\t\to.default = '0';\n\t\to.rmempty = false;\n""", "\n"),
+          ]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit("Expected TurboACC JS block not found")
+              s = s.replace(old, new, 1)
+          js.write_text(s)
+
+          rpc = Path("package/mtk/applications/luci-app-turboacc-mtk/root/usr/libexec/rpcd/luci.turboacc")
+          s = rpc.read_text()
+          old = '\t\t\t\thasXTFULLCONENAT  = fs.access("/lib/modules/" .. boardinfo.kernel .. "/xt_FULLCONENAT.ko"),\n'
+          if old not in s:
+              raise SystemExit("Expected TurboACC RPC feature line not found")
+          s = s.replace(old, "", 1)
+          start = s.find("\tgetFullConeStat = {")
+          end = s.find("\tgetTCPCCAStat = {", start)
+          if start < 0 or end < 0:
+              raise SystemExit("Expected TurboACC RPC getFullConeStat block not found")
+          s = s[:start] + s[end:]
+          rpc.write_text(s)
+          PY
+
+          # Re-resolve config after dropping the legacy dependency.
           make defconfig
 
       - name: Validate N60 Pro config
@@ -261,7 +334,10 @@ jobs:
             'CONFIG_PACKAGE_luci-app-turboacc-mtk=y'
             'CONFIG_PACKAGE_luci-app-eqos-mtk=y'
             'CONFIG_PACKAGE_kmod-nft-nat=y'
+            'CONFIG_PACKAGE_iptables-nft=y'
             'CONFIG_PACKAGE_luci-app-openclash=y'
+            'CONFIG_PACKAGE_luci-theme-argon=y'
+            'CONFIG_PACKAGE_luci-app-argon-config=y'
           )
           for s in "${required[@]}"; do
             grep -Fxq "$s" .config && echo "OK   $s" || { echo "FAIL $s"; exit 30; }
@@ -270,7 +346,10 @@ jobs:
           for s in \
             CONFIG_PACKAGE_kmod-mt7915e=y \
             CONFIG_PACKAGE_kmod-mt7986-firmware=y \
-            CONFIG_PACKAGE_mt7986-wo-firmware=y; do
+            CONFIG_PACKAGE_mt7986-wo-firmware=y \
+            CONFIG_PACKAGE_kmod-ipt-fullconenat=y \
+            CONFIG_PACKAGE_iptables-mod-fullconenat=y \
+            CONFIG_PACKAGE_ip6tables-mod-fullconenat=y; do
             ! grep -Fxq "$s" .config && echo "OK   not selected: $s" || { echo "FAIL selected: $s"; exit 31; }
           done
      
@@ -397,7 +476,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: n60pro-fullcone-v4-${{ github.run_number }}
+          name: n60pro-fullcone-v5-${{ github.run_number }}
           path: |
             immortalwrt/.config
             immortalwrt/feeds.conf.default
@@ -436,6 +515,23 @@ jobs:
             exit 50
           }
 
+          MANIFEST="$OUT/immortalwrt-mediatek-filogic.manifest"
+          test -f "$MANIFEST"
+
+          for pkg in iptables-nft luci-app-openclash luci-theme-argon luci-app-argon-config kmod-mt_wifi kmod-warp kmod-mediatek_hnat; do
+            grep -Eq "^$pkg([[:space:]]|$)" "$MANIFEST" || {
+              echo "ERROR: required package missing from manifest: $pkg"
+              exit 51
+            }
+          done
+
+          for pkg in kmod-ipt-fullconenat iptables-mod-fullconenat ip6tables-mod-fullconenat wrtbwmon luci-app-wrtbwmon luci-app-passwall zerotier; do
+            ! grep -Eq "^$pkg([[:space:]]|$)" "$MANIFEST" || {
+              echo "ERROR: forbidden package present in manifest: $pkg"
+              exit 52
+            }
+          done
+
           {
             echo "PadavanOnly commit: $PADAVANONLY_COMMIT"
             echo "SONiC Full Cone commit: $SONIC_FULLCONE_COMMIT"
@@ -450,7 +546,7 @@ jobs:
         if: ${{ env.RUN_MODE == 'build' }}
         uses: actions/upload-artifact@v4
         with:
-          name: netcore-n60-pro-fullcone-v4-${{ github.run_number }}
+          name: netcore-n60-pro-fullcone-v5-${{ github.run_number }}
           path: immortalwrt/bin/targets/mediatek/filogic/
           if-no-files-found: error
           retention-days: 14
