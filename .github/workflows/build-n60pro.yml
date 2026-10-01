@@ -1,4 +1,4 @@
-name: Validate N60 Pro Full Cone v3
+name: N60 Pro SONiC Full Cone v4
 
 on:
   workflow_dispatch:
@@ -12,14 +12,14 @@ on:
           - validate
           - build
       source_ref:
-        description: "PadavanOnly source branch/tag/commit"
+        description: "PadavanOnly source branch/tag/commit (tested default is pinned)"
         required: true
-        default: "openwrt-24.10-6.6"
+        default: "ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8"
         type: string
       sonic_ref:
-        description: "SONiC Full Cone branch/tag/commit"
+        description: "SONiC Full Cone branch/tag/commit (tested default is pinned)"
         required: true
-        default: "master"
+        default: "4de0643f6b48e7e7d57d768144204ce5d3078c8f"
         type: string
 
 permissions:
@@ -29,6 +29,8 @@ env:
   SOURCE_REPO: https://github.com/padavanonly/immortalwrt-mt798x-6.6.git
   SOURCE_DIR: immortalwrt
   SONIC_REPO: https://github.com/mufeng05/openwrt-sonic-fullcone.git
+  PINNED_SOURCE_REF: ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8
+  PINNED_SONIC_REF: 4de0643f6b48e7e7d57d768144204ce5d3078c8f
 
 jobs:
   n60pro:
@@ -43,9 +45,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.mode }}" == "build" && "${{ inputs.sonic_ref }}" == "master" ]]; then
-            echo "ERROR: build mode must use a fixed SONiC commit SHA, not master."
-            exit 2
+          if [[ "${{ inputs.mode }}" == "build" ]]; then
+            [[ "${{ inputs.source_ref }}" == "$PINNED_SOURCE_REF" ]] || {
+              echo "ERROR: build mode must use tested PadavanOnly commit $PINNED_SOURCE_REF"
+              exit 2
+            }
+            [[ "${{ inputs.sonic_ref }}" == "$PINNED_SONIC_REF" ]] || {
+              echo "ERROR: build mode must use tested SONiC commit $PINNED_SONIC_REF"
+              exit 3
+            }
           fi
 
       - name: Free disk space
@@ -70,9 +78,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "${{ inputs.source_ref }}" "$SOURCE_REPO" "$SOURCE_DIR"
+          rm -rf "$SOURCE_DIR"
+          git init -q "$SOURCE_DIR"
           cd "$SOURCE_DIR"
-          echo "PADAVANONLY_COMMIT=$(git rev-parse HEAD)" | tee -a "$GITHUB_ENV"
+          git remote add origin "$SOURCE_REPO"
+          git fetch --depth 1 origin "${{ inputs.source_ref }}"
+          git checkout --detach FETCH_HEAD
+          PADAVANONLY_COMMIT="$(git rev-parse HEAD)"
+          echo "PADAVANONLY_COMMIT=$PADAVANONLY_COMMIT" | tee -a "$GITHUB_ENV"
           git log -1 --oneline
 
       - name: Update and install feeds
@@ -131,6 +144,45 @@ jobs:
           cp -f "$SRC/patches/nftables/002-nftables-add-fullcone-expression-support.patch" \
             package/network/utils/nftables/patches/
 
+          # PadavanOnly already carries its own firewall4 Full Cone integration.
+          # Keep that integration, but make its SNAT rule use SONiC's required
+          # port range so the kernel enters NF_NAT_RANGE_PROTO_SPECIFIED and
+          # enforces translated 3-tuple uniqueness (EIM).
+          cat > package/network/config/firewall4/patches/003-sonic-fullcone-range-compat.patch <<'PATCH'
+--- a/root/usr/share/firewall4/templates/zone-fullcone.uc
++++ b/root/usr/share/firewall4/templates/zone-fullcone.uc
+@@ -1,4 +1,15 @@
+-{# /usr/share/firewall4/templates/zone-fullcone.uc #}
+-		meta nfproto {{ fw4.nfproto(family) }} fullcone comment "!fw4: Handle {{
+-		zone.name
+-}} {{ fw4.nfproto(family, true) }} fullcone NAT {{ direction }} traffic"
++{# /usr/share/firewall4/templates/zone-fullcone.uc
++   PadavanOnly compatibility: keep its global enable model while using
++   SONiC's required SNAT port range for protocols with a port/id/key.
++ -#}
++{%
++	let snat_range = "1024-65535";
++	let l4 = (name) => fw4.l4proto(family, { name });
++	let keyed = map([ "tcp", "udp", "sctp", "dccp", "udplite", "icmp", "gre" ], l4);
++	let label = `${zone.name} ${fw4.nfproto(family, true)} fullcone`;
++-%}
++{% if (direction == "srcnat"): -%}
++meta nfproto {{ fw4.nfproto(family) }} meta l4proto {{ "{ " + join(", ", keyed) + " }" }} fullcone to :{{ snat_range }} comment "!fw4: {{ label }} NAT srcnat"
++		meta nfproto {{ fw4.nfproto(family) }} fullcone comment "!fw4: {{ label }} NAT srcnat, other protocols"
++{% else -%}
++meta nfproto {{ fw4.nfproto(family) }} fullcone comment "!fw4: {{ label }} NAT {{ direction }}"
++{% endif -%}
+--- a/root/usr/share/ucode/fw4.uc
++++ b/root/usr/share/ucode/fw4.uc
+@@ -501,6 +501,7 @@ function nft_try_fullcone() {
+ 		'add chain inet fw4-fullcone-test srcnat { ' +
+ 			'type nat hook postrouting priority -100; policy accept; ' +
++			'meta l4proto { tcp, udp } fullcone to :1024-65535; ' +
+ 			'fullcone; ' +
+ 		'}; ';
+ 	let cmd = sprintf("/usr/sbin/nft -c '%s' 2>/dev/null", replace(nft_test, "'", "'\\''"));
+PATCH
+
           if [[ -d package/network/config/firewall ]]; then
             mkdir -p package/network/config/firewall/patches
             cp -f "$SRC/firewall/firewall3/001-sonic-fullcone.patch" \
@@ -142,6 +194,7 @@ jobs:
           find package/network/utils/iptables/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
           find package/libs/libnftnl/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
           find package/network/utils/nftables/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
+          find package/network/config/firewall4/patches -maxdepth 1 -type f -iname '*fullcone*' -printf '%f\n' | sort || true
          
       - name: Prepare N60 Pro MTK config
         shell: bash
@@ -313,9 +366,32 @@ jobs:
             fi
           }
 
+          compile_one package/network/utils/iptables/compile iptables-fullcone.log
           compile_one package/libs/libnftnl/compile libnftnl-fullcone.log
           compile_one package/network/utils/nftables/compile nftables-fullcone.log
           compile_one package/network/config/firewall4/compile firewall4-fullcone.log
+
+      - name: Verify fw4 SONiC range compatibility
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          FW4_DIR="$(find build_dir -maxdepth 2 -type d -name 'firewall4-*' -print -quit)"
+          test -n "$FW4_DIR"
+
+          ZONE="$FW4_DIR/root/usr/share/firewall4/templates/zone-fullcone.uc"
+          FW4UC="$FW4_DIR/root/usr/share/ucode/fw4.uc"
+          test -f "$ZONE"
+          test -f "$FW4UC"
+
+          {
+            echo "===== FIREWALL4 PREPARED SOURCE ====="
+            echo "$FW4_DIR"
+            echo "===== ZONE TEMPLATE RANGE RULE ====="
+            grep -nF 'fullcone to :1024-65535' "$ZONE"
+            echo "===== RUNTIME PROBE RANGE RULE ====="
+            grep -nF 'fullcone to :1024-65535' "$FW4UC"
+          } | tee ../fw4-range-compat.log
 
       - name: Validation summary
         shell: bash
@@ -328,7 +404,7 @@ jobs:
           echo "Target             : netcore_n60-pro"
           echo "Wi-Fi stack        : kmod-mt_wifi"
           echo "Acceleration       : WARP + MediaTek HNAT"
-          echo "Full Cone          : complete SONiC patchset"
+          echo "Full Cone          : SONiC kernel/userspace + PadavanOnly fw4 range compatibility"
           echo "=========================================="
           echo "Do NOT flash yet. Review this result first."
 
@@ -336,14 +412,16 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: n60pro-fullcone-v3-${{ github.run_number }}
+          name: n60pro-fullcone-v4-${{ github.run_number }}
           path: |
             immortalwrt/.config
             immortalwrt/feeds.conf.default
             kernel-fullcone-preflight.log
+            iptables-fullcone.log
             libnftnl-fullcone.log
             nftables-fullcone.log
             firewall4-fullcone.log
+            fw4-range-compat.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -355,11 +433,39 @@ jobs:
           set -euo pipefail
           make -j"$(nproc)" || make -j1 V=s
 
+      - name: Verify built firmware and write build manifest
+        if: ${{ inputs.mode == 'build' }}
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          OUT=bin/targets/mediatek/filogic
+          test -d "$OUT"
+
+          echo "===== BUILD OUTPUT ====="
+          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
+
+          IMAGE="$(find "$OUT" -maxdepth 1 -type f | grep -Ei 'netcore[-_]?n60[-_]?pro.*sysupgrade' | head -n 1 || true)"
+          test -n "$IMAGE" || {
+            echo "ERROR: Netcore N60 Pro sysupgrade image not found."
+            exit 50
+          }
+
+          {
+            echo "PadavanOnly commit: $PADAVANONLY_COMMIT"
+            echo "SONiC Full Cone commit: $SONIC_FULLCONE_COMMIT"
+            echo "Target: netcore_n60-pro"
+            echo "Full Cone: SONiC kernel/userspace + PadavanOnly fw4 range compatibility"
+            echo "Image: $(basename "$IMAGE")"
+            echo
+            sha256sum "$IMAGE"
+          } | tee "$OUT/CHATGPT-BUILD-INFO.txt"
+
       - name: Upload firmware
         if: ${{ inputs.mode == 'build' }}
         uses: actions/upload-artifact@v4
         with:
-          name: netcore-n60-pro-fullcone-v3-${{ github.run_number }}
+          name: netcore-n60-pro-fullcone-v4-${{ github.run_number }}
           path: immortalwrt/bin/targets/mediatek/filogic/
           if-no-files-found: error
           retention-days: 14
