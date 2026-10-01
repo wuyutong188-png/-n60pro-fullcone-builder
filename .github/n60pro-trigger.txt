@@ -5,4 +5,4 @@
 #
 # Formal firmware BUILD remains manual via workflow_dispatch.
 #
-# Trigger generation: 2
+# Trigger generation: 3
