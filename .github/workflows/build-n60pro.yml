@@ -21,6 +21,11 @@ on:
         required: true
         default: "4de0643f6b48e7e7d57d768144204ce5d3078c8f"
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/n60pro-trigger.txt"
 
 permissions:
   contents: read
@@ -31,6 +36,9 @@ env:
   SONIC_REPO: https://github.com/mufeng05/openwrt-sonic-fullcone.git
   PINNED_SOURCE_REF: ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8
   PINNED_SONIC_REF: 4de0643f6b48e7e7d57d768144204ce5d3078c8f
+  RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'validate' }}
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || 'ec9ef10efc65da1e6d1de4e2c043c0e13d08eed8' }}
+  SONIC_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.sonic_ref || '4de0643f6b48e7e7d57d768144204ce5d3078c8f' }}
 
 jobs:
   n60pro:
@@ -45,12 +53,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.mode }}" == "build" ]]; then
-            [[ "${{ inputs.source_ref }}" == "$PINNED_SOURCE_REF" ]] || {
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Effective mode: $RUN_MODE"
+          echo "Effective PadavanOnly ref: $SOURCE_REF"
+          echo "Effective SONiC ref: $SONIC_REF"
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$RUN_MODE" != "validate" ]]; then
+            echo "ERROR: file-triggered runs are restricted to validate mode."
+            exit 1
+          fi
+
+          if [[ "$RUN_MODE" == "build" ]]; then
+            [[ "$SOURCE_REF" == "$PINNED_SOURCE_REF" ]] || {
               echo "ERROR: build mode must use tested PadavanOnly commit $PINNED_SOURCE_REF"
               exit 2
             }
-            [[ "${{ inputs.sonic_ref }}" == "$PINNED_SONIC_REF" ]] || {
+            [[ "$SONIC_REF" == "$PINNED_SONIC_REF" ]] || {
               echo "ERROR: build mode must use tested SONiC commit $PINNED_SONIC_REF"
               exit 3
             }
@@ -82,7 +100,7 @@ jobs:
           git init -q "$SOURCE_DIR"
           cd "$SOURCE_DIR"
           git remote add origin "$SOURCE_REPO"
-          git fetch --depth 1 origin "${{ inputs.source_ref }}"
+          git fetch --depth 1 origin "$SOURCE_REF"
           git checkout --detach FETCH_HEAD
           PADAVANONLY_COMMIT="$(git rev-parse HEAD)"
           echo "PADAVANONLY_COMMIT=$PADAVANONLY_COMMIT" | tee -a "$GITHUB_ENV"
@@ -103,7 +121,7 @@ jobs:
           git init -q /tmp/sonic-fullcone
           cd /tmp/sonic-fullcone
           git remote add origin "$SONIC_REPO"
-          git fetch --depth 1 origin "${{ inputs.sonic_ref }}"
+          git fetch --depth 1 origin "$SONIC_REF"
           git checkout --detach FETCH_HEAD
           SONIC_COMMIT="$(git rev-parse HEAD)"
           echo "SONIC_FULLCONE_COMMIT=$SONIC_COMMIT" | tee -a "$GITHUB_ENV"
@@ -426,7 +444,7 @@ PATCH
           retention-days: 14
 
       - name: Build firmware
-        if: ${{ inputs.mode == 'build' }}
+        if: ${{ env.RUN_MODE == 'build' }}
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
@@ -434,7 +452,7 @@ PATCH
           make -j"$(nproc)" || make -j1 V=s
 
       - name: Verify built firmware and write build manifest
-        if: ${{ inputs.mode == 'build' }}
+        if: ${{ env.RUN_MODE == 'build' }}
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
@@ -462,7 +480,7 @@ PATCH
           } | tee "$OUT/CHATGPT-BUILD-INFO.txt"
 
       - name: Upload firmware
-        if: ${{ inputs.mode == 'build' }}
+        if: ${{ env.RUN_MODE == 'build' }}
         uses: actions/upload-artifact@v4
         with:
           name: netcore-n60-pro-fullcone-v4-${{ github.run_number }}
