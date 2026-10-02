@@ -87,7 +87,7 @@ jobs:
             echo "$f $(git -C feeds/$f rev-parse HEAD)"
           done
 
-      - name: Apply Rust 1.89 GitHub Actions compatibility fix
+      - name: Apply Rust 1.89 GitHub Actions and retired LLVM compatibility fixes
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
@@ -99,7 +99,12 @@ jobs:
           import sys
 
           path = Path(sys.argv[1])
-          lines = path.read_text().splitlines()
+          text = path.read_text()
+          old_llvm = "--set=llvm.download-ci-llvm=true"
+          new_llvm = "--set=llvm.download-ci-llvm=false"
+          assert text.count(old_llvm) == 1, "unexpected Rust LLVM download setting"
+          text = text.replace(old_llvm, new_llvm)
+          lines = text.splitlines()
           slash = chr(92)
           xpy = "\t$(PYTHON) $(HOST_BUILD_DIR)/x.py " + slash
           build_dir = "\t\t--build-dir $(HOST_BUILD_DIR)/build " + slash
@@ -110,6 +115,7 @@ jobs:
           path.write_text("\n".join(lines) + "\n")
           PY
           grep -F -- '--ci false' "$RUST_MK"
+          grep -F -- '--set=llvm.download-ci-llvm=false' "$RUST_MK"
 
       - name: Import historical OpenClash package
         shell: bash
