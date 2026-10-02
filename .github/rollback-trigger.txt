@@ -1,4 +1,6 @@
 Trigger N60 Pro 6.6.95 rollback build from current-system source baseline.
 Source: 87f9199b1d7d0e42cb461fa12c2d2a30c9458b4c
 OpenClash: 0.46.102 @ be0c3d51ccddc582ffbdfbbbb4d461a1be1b4d41
-Retry: 2026-10-03T01:12:00+08:00
+Argon theme: e0188ed05b23986da5e3cc5fbefd1a8b0e596fd0
+Argon config: f22e7cfec363b5c3c7fce1fe476924464cd30e1a
+Retry: 2026-10-03T02:05:00+08:00
