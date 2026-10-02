@@ -479,32 +479,19 @@ jobs:
           echo "=========================================="
           echo "Do NOT flash yet. Review this result first."
 
-      - name: Save validation files and logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: n60pro-fullcone-v5-${{ github.run_number }}
-          path: |
-            immortalwrt/.config
-            immortalwrt/feeds.conf.default
-            kernel-fullcone-preflight.log
-            iptables-fullcone.log
-            libnftnl-fullcone.log
-            nftables-fullcone.log
-            firewall4-fullcone.log
-            fw4-range-compat.log
-          if-no-files-found: ignore
-          retention-days: 14
-
       - name: Build firmware
+        id: build_firmware
         if: ${{ env.RUN_MODE == 'build' }}
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
         run: |
           set -euo pipefail
-          make -j"$(nproc)" || make -j1 V=s
+          if ! make -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/firmware-build.log"; then
+            make -j1 V=s 2>&1 | tee -a "$GITHUB_WORKSPACE/firmware-build.log"
+          fi
 
       - name: Verify built firmware and write build manifest
+        id: verify_firmware
         if: ${{ env.RUN_MODE == 'build' }}
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
@@ -516,44 +503,68 @@ jobs:
           echo "===== BUILD OUTPUT ====="
           find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
 
-          IMAGE="$(find "$OUT" -maxdepth 1 -type f | grep -Ei 'netcore[-_]?n60[-_]?pro.*sysupgrade' | head -n 1 || true)"
-          test -n "$IMAGE" || {
-            echo "ERROR: Netcore N60 Pro sysupgrade image not found."
-            exit 50
-          }
-
-          MANIFEST="$OUT/immortalwrt-mediatek-filogic.manifest"
-          test -f "$MANIFEST"
-
-          for pkg in iptables-nft luci-app-openclash luci-theme-argon luci-app-argon-config kmod-mt_wifi kmod-warp kmod-mediatek_hnat; do
-            grep -Eq "^$pkg([[:space:]]|$)" "$MANIFEST" || {
-              echo "ERROR: required package missing from manifest: $pkg"
-              exit 51
-            }
-          done
-
-          for pkg in kmod-ipt-fullconenat iptables-mod-fullconenat ip6tables-mod-fullconenat wrtbwmon luci-app-wrtbwmon luci-app-passwall zerotier; do
-            ! grep -Eq "^$pkg([[:space:]]|$)" "$MANIFEST" || {
-              echo "ERROR: forbidden package present in manifest: $pkg"
-              exit 52
-            }
-          done
+          python3 "$GITHUB_WORKSPACE/scripts/verify-firmware.py" . 2>&1 | tee "$GITHUB_WORKSPACE/firmware-verification.log"
+          IMAGE="$OUT/immortalwrt-mediatek-filogic-netcore_n60-pro-squashfs-sysupgrade.bin"
 
           {
+            echo "Builder commit: $GITHUB_SHA"
+            echo "Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "PadavanOnly commit: $PADAVANONLY_COMMIT"
             echo "SONiC Full Cone commit: $SONIC_FULLCONE_COMMIT"
             echo "Target: netcore_n60-pro"
             echo "Full Cone: SONiC kernel/userspace + PadavanOnly fw4 range compatibility"
             echo "Image: $(basename "$IMAGE")"
+            echo "Artifact checks: passed; router compatibility and runtime checks still pending"
             echo
             sha256sum "$IMAGE"
           } | tee "$OUT/CHATGPT-BUILD-INFO.txt"
 
       - name: Upload firmware
-        if: ${{ env.RUN_MODE == 'build' }}
+        if: ${{ success() && env.RUN_MODE == 'build' && steps.verify_firmware.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: netcore-n60-pro-fullcone-v5-${{ github.run_number }}
           path: immortalwrt/bin/targets/mediatek/filogic/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve unverified image for failed-check diagnosis
+        if: ${{ failure() && env.RUN_MODE == 'build' && steps.build_firmware.outcome == 'success' && steps.verify_firmware.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: n60pro-UNVERIFIED-diagnostics-v5-${{ github.run_number }}
+          path: |
+            immortalwrt/bin/targets/mediatek/filogic/*sysupgrade.bin
+            immortalwrt/bin/targets/mediatek/filogic/*.manifest
+            immortalwrt/bin/targets/mediatek/filogic/profiles.json
+            immortalwrt/bin/targets/mediatek/filogic/sha256sums
+            immortalwrt/bin/targets/mediatek/filogic/config.buildinfo
+            immortalwrt/bin/targets/mediatek/filogic/feeds.buildinfo
+            immortalwrt/bin/targets/mediatek/filogic/version.buildinfo
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Save validation files and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: n60pro-fullcone-v5-${{ github.run_number }}
+          # Only the explicitly listed build config may include hidden files.
+          include-hidden-files: true
+          path: |
+            immortalwrt/.config
+            immortalwrt/feeds.conf.default
+            immortalwrt/bin/targets/mediatek/filogic/*.manifest
+            immortalwrt/bin/targets/mediatek/filogic/profiles.json
+            immortalwrt/bin/targets/mediatek/filogic/sha256sums
+            immortalwrt/bin/targets/mediatek/filogic/*.buildinfo
+            kernel-fullcone-preflight.log
+            iptables-fullcone.log
+            libnftnl-fullcone.log
+            nftables-fullcone.log
+            firewall4-fullcone.log
+            fw4-range-compat.log
+            firmware-build.log
+            firmware-verification.log
+          if-no-files-found: ignore
           retention-days: 14
