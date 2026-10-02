@@ -15,15 +15,17 @@ TARGET = "mediatek/filogic"
 PREFIX = f"immortalwrt-mediatek-filogic-{DEVICE}"
 IMAGE_NAME = f"{PREFIX}-squashfs-sysupgrade.bin"
 REQUIRED_PACKAGES = (
-    "firewall4", "libnftnl11", "kmod-nft-nat",
+    "firewall4", "libnftnl11", "kmod-nft-nat", "iptables-nft",
     "kmod-mt_wifi", "kmod-warp", "kmod-mediatek_hnat",
     "luci-app-mtwifi-cfg", "luci-app-turboacc-mtk", "luci-app-eqos-mtk",
-    "luci-app-openclash", "mtk-smp", "mtkhqos_util",
+    "luci-app-openclash", "luci-theme-argon", "luci-app-argon-config",
+    "mtk-smp", "mtkhqos_util",
     "kmod-pppoe", "ppp-mod-pppoe", "kmod-usb3",
     "kmod-usb-storage", "kmod-usb-storage-uas",
 )
 FORBIDDEN_PACKAGES = (
     "kmod-mt7915e", "kmod-mt7986-firmware", "mt7986-wo-firmware",
+    "kmod-ipt-fullconenat", "iptables-mod-fullconenat", "ip6tables-mod-fullconenat",
     "wrtbwmon", "luci-app-wrtbwmon", "luci-app-passwall",
     "zerotier", "luci-app-zerotier",
 )
@@ -61,7 +63,9 @@ def verify(out, fwtool):
     print(f"OK image SHA-256: {digest}")
 
     manifest = {}
-    for line in (out / f"{PREFIX}.manifest").read_text().splitlines():
+    manifest_path = out / f"{PREFIX}.manifest"
+    require(manifest_path.is_file(), f"missing device manifest: {manifest_path.name}")
+    for line in manifest_path.read_text().splitlines():
         package, version = line.split(" - ", 1)
         require(package not in manifest, f"duplicate manifest package: {package}")
         manifest[package] = version
@@ -74,7 +78,7 @@ def verify(out, fwtool):
     kernel_version = profiles["linux_kernel"]["version"]
     require(manifest.get("kernel", "").startswith(kernel_version + "~"),
             "kernel version differs between profile and manifest")
-    print(f"OK manifest: MTK/WARP/HNAT, OpenClash, PPPoE, USB; kernel {kernel_version}")
+    print(f"OK manifest: {manifest_path.name}; v5 MTK/WARP/HNAT, OpenClash, iptables-nft, Argon, PPPoE, USB; kernel {kernel_version}")
 
     config = (out / "config.buildinfo").read_text().splitlines()
     selected = [line for line in config if line.startswith("CONFIG_TARGET_")
