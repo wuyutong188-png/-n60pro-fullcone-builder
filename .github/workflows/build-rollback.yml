@@ -1,0 +1,342 @@
+name: N60 Pro 6.6.95 rollback
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/rollback-trigger.txt"
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: https://github.com/padavanonly/immortalwrt-mt798x-6.6.git
+  SOURCE_REF: 87f9199b1d7d0e42cb461fa12c2d2a30c9458b4c
+  SOURCE_DIR: immortalwrt
+  PACKAGES_FEED: 8dda4c85f9603461c95ac21d9ca267ab7cbb405d
+  LUCI_FEED: 85db8333ee9661f31e999b52bbbe4804d5e7dab8
+  ROUTING_FEED: 3eb59e9471858c83891979793f1dd29cca156919
+  TELEPHONY_FEED: 11e9c73bff6be34ff2fdcd4bc0e81a4723d78652
+
+jobs:
+  rollback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          df -h
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            python3-pyelftools rsync swig unzip zlib1g-dev file wget curl \
+            libelf-dev libzstd-dev zstd jq time ccache subversion quilt \
+            asciidoc help2man intltool libxml-parser-perl xsltproc \
+            autoconf automake autopoint libtool pkg-config
+
+      - name: Clone exact current-system PadavanOnly source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$SOURCE_DIR"
+          git init -q "$SOURCE_DIR"
+          cd "$SOURCE_DIR"
+          git remote add origin "$SOURCE_REPO"
+          git fetch --depth 1 origin "$SOURCE_REF"
+          git checkout --detach FETCH_HEAD
+          RESOLVED="$(git rev-parse HEAD)"
+          test "$RESOLVED" = "$SOURCE_REF"
+          echo "PADAVANONLY_COMMIT=$RESOLVED" >> "$GITHUB_ENV"
+          git log -1 --oneline
+          grep -Fx 'LINUX_VERSION-6.6 = .95' include/kernel-6.6
+
+      - name: Pin historical feeds near current firmware build date
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          cat > feeds.conf.default <<EOF
+          src-git packages https://github.com/immortalwrt/packages.git^$PACKAGES_FEED
+          src-git luci https://github.com/immortalwrt/luci.git^$LUCI_FEED
+          src-git routing https://github.com/openwrt/routing.git^$ROUTING_FEED
+          src-git telephony https://github.com/openwrt/telephony.git^$TELEPHONY_FEED
+          EOF
+          cat feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          for f in packages luci routing telephony; do
+            echo "$f $(git -C feeds/$f rev-parse HEAD)"
+          done
+
+      - name: Prepare rollback N60 Pro config
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+
+          if [[ -f defconfig/mt7975-ipailna-high-power.config ]]; then
+            BASE=defconfig/mt7975-ipailna-high-power.config
+          elif [[ -f defconfig/mt7986-ax6000.config ]]; then
+            BASE=defconfig/mt7986-ax6000.config
+          else
+            echo "ERROR: no suitable MT7986 defconfig found"
+            exit 20
+          fi
+
+          cp -f "$BASE" .config
+          echo "Using base config: $BASE"
+
+          set_cfg() {
+            local sym="$1" val="$2"
+            sed -i -e "/^${sym}=.*/d" -e "/^# ${sym} is not set$/d" .config
+            case "$val" in
+              y|m) echo "${sym}=${val}" >> .config ;;
+              n) echo "# ${sym} is not set" >> .config ;;
+              *) echo "invalid config value"; exit 21 ;;
+            esac
+          }
+
+          set_cfg CONFIG_TARGET_mediatek y
+          set_cfg CONFIG_TARGET_mediatek_filogic y
+          set_cfg CONFIG_TARGET_mediatek_filogic_DEVICE_netcore_n60-pro y
+
+          set_cfg CONFIG_PACKAGE_kmod-mt_wifi y
+          set_cfg CONFIG_PACKAGE_kmod-warp y
+          set_cfg CONFIG_PACKAGE_kmod-mediatek_hnat y
+          set_cfg CONFIG_PACKAGE_luci-app-mtwifi-cfg y
+          set_cfg CONFIG_PACKAGE_luci-app-turboacc-mtk y
+          set_cfg CONFIG_PACKAGE_luci-app-eqos-mtk y
+          set_cfg CONFIG_PACKAGE_mtk-smp y
+          set_cfg CONFIG_PACKAGE_mtkhqos_util y
+
+          set_cfg CONFIG_PACKAGE_firewall4 y
+          set_cfg CONFIG_PACKAGE_kmod-nft-nat y
+          set_cfg CONFIG_PACKAGE_kmod-nft-offload y
+          set_cfg CONFIG_PACKAGE_iptables-nft y
+          set_cfg CONFIG_PACKAGE_ip6tables-nft y
+          set_cfg CONFIG_PACKAGE_luci-app-openclash y
+          set_cfg CONFIG_PACKAGE_luci-theme-argon y
+          set_cfg CONFIG_PACKAGE_luci-app-argon-config y
+          set_cfg CONFIG_PACKAGE_kmod-pppoe y
+          set_cfg CONFIG_PACKAGE_ppp-mod-pppoe y
+          set_cfg CONFIG_PACKAGE_kmod-usb3 y
+          set_cfg CONFIG_PACKAGE_kmod-usb-storage y
+          set_cfg CONFIG_PACKAGE_kmod-usb-storage-uas y
+
+          set_cfg CONFIG_PACKAGE_kmod-mt7915e n
+          set_cfg CONFIG_PACKAGE_kmod-mt7986-firmware n
+          set_cfg CONFIG_PACKAGE_mt7986-wo-firmware n
+          set_cfg CONFIG_PACKAGE_kmod-ipt-fullconenat n
+          set_cfg CONFIG_PACKAGE_iptables-mod-fullconenat n
+          set_cfg CONFIG_PACKAGE_ip6tables-mod-fullconenat n
+
+          make defconfig
+
+      - name: Validate rollback config
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          required=(
+            'CONFIG_TARGET_mediatek=y'
+            'CONFIG_TARGET_mediatek_filogic=y'
+            'CONFIG_TARGET_mediatek_filogic_DEVICE_netcore_n60-pro=y'
+            'CONFIG_PACKAGE_kmod-mt_wifi=y'
+            'CONFIG_PACKAGE_kmod-warp=y'
+            'CONFIG_PACKAGE_kmod-mediatek_hnat=y'
+            'CONFIG_PACKAGE_luci-app-mtwifi-cfg=y'
+            'CONFIG_PACKAGE_luci-app-turboacc-mtk=y'
+            'CONFIG_PACKAGE_luci-app-eqos-mtk=y'
+            'CONFIG_PACKAGE_iptables-nft=y'
+            'CONFIG_PACKAGE_luci-app-openclash=y'
+            'CONFIG_PACKAGE_luci-theme-argon=y'
+            'CONFIG_PACKAGE_luci-app-argon-config=y'
+          )
+          for s in "${required[@]}"; do
+            grep -Fxq "$s" .config && echo "OK   $s" || { echo "FAIL $s"; exit 30; }
+          done
+
+          forbidden=(
+            CONFIG_PACKAGE_kmod-mt7915e
+            CONFIG_PACKAGE_kmod-mt7986-firmware
+            CONFIG_PACKAGE_mt7986-wo-firmware
+            CONFIG_PACKAGE_kmod-ipt-fullconenat
+            CONFIG_PACKAGE_iptables-mod-fullconenat
+            CONFIG_PACKAGE_ip6tables-mod-fullconenat
+          )
+          for sym in "${forbidden[@]}"; do
+            if grep -Eq "^${sym}=(y|m)$" .config; then
+              echo "FAIL selected: $sym"
+              exit 31
+            fi
+            echo "OK   not selected: $sym"
+          done
+
+      - name: Download sources
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          make download -j"$(nproc)"
+          find dl -type f -size -1024c -print -delete || true
+
+      - name: Build rollback firmware
+        id: build
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          if ! make -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/rollback-build.log"; then
+            make -j1 V=s 2>&1 | tee -a "$GITHUB_WORKSPACE/rollback-build.log"
+          fi
+
+      - name: Verify rollback firmware
+        id: verify
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          OUT=bin/targets/mediatek/filogic
+          IMAGE="$OUT/immortalwrt-mediatek-filogic-netcore_n60-pro-squashfs-sysupgrade.bin"
+          MANIFEST="$OUT/immortalwrt-mediatek-filogic-netcore_n60-pro.manifest"
+
+          test -s "$IMAGE"
+          test -s "$MANIFEST"
+          test -s "$OUT/profiles.json"
+          test -s "$OUT/sha256sums"
+
+          echo "===== OUTPUT ====="
+          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
+
+          echo "===== REQUIRED PACKAGES ====="
+          required=(
+            firewall4
+            iptables-nft
+            kmod-nft-nat
+            kmod-mt_wifi
+            kmod-warp
+            kmod-mediatek_hnat
+            luci-app-mtwifi-cfg
+            luci-app-turboacc-mtk
+            luci-app-eqos-mtk
+            luci-app-openclash
+            luci-theme-argon
+            luci-app-argon-config
+            kmod-pppoe
+            ppp-mod-pppoe
+            kmod-usb3
+            kmod-usb-storage
+            kmod-usb-storage-uas
+          )
+          for p in "${required[@]}"; do
+            grep -Eq "^${p} - " "$MANIFEST" || { echo "MISSING $p"; exit 40; }
+            grep -E "^${p} - " "$MANIFEST"
+          done
+
+          echo "===== FORBIDDEN PACKAGES ====="
+          forbidden=(
+            kmod-mt7915e
+            kmod-mt7986-firmware
+            mt7986-wo-firmware
+            kmod-ipt-fullconenat
+            iptables-mod-fullconenat
+            ip6tables-mod-fullconenat
+          )
+          for p in "${forbidden[@]}"; do
+            if grep -Eq "^${p} - " "$MANIFEST"; then
+              echo "FORBIDDEN PRESENT: $p"
+              exit 41
+            fi
+            echo "OK absent: $p"
+          done
+
+          grep -Eq '^kernel - 6\.6\.95' "$MANIFEST" || {
+            echo "ERROR: rollback kernel is not 6.6.95"
+            grep '^kernel - ' "$MANIFEST" || true
+            exit 42
+          }
+
+          HOST_FWTOOL="$(find staging_dir/host -type f -name fwtool -perm -111 -print -quit)"
+          test -n "$HOST_FWTOOL"
+          META="$("$HOST_FWTOOL" -i - "$IMAGE")"
+          echo "$META"
+          echo "$META" | grep -F '"supported_devices":["netcore,n60-pro"]'
+          echo "$META" | grep -F '"target": "mediatek/filogic"'
+          echo "$META" | grep -F '"board": "netcore_n60-pro"'
+
+          IMAGE_SHA="$(sha256sum "$IMAGE" | awk '{print $1}')"
+          grep -F "$IMAGE_SHA" "$OUT/sha256sums"
+          python3 - "$OUT/profiles.json" "$IMAGE_SHA" <<'PY'
+          import json, sys
+          p, want = sys.argv[1], sys.argv[2]
+          data = json.load(open(p))
+          found = False
+          for prof in data.get("profiles", {}).values():
+              for img in prof.get("images", []):
+                  if img.get("name", "").endswith("netcore_n60-pro-squashfs-sysupgrade.bin"):
+                      assert img.get("sha256") == want, (img.get("sha256"), want)
+                      found = True
+          assert found, "sysupgrade image not found in profiles.json"
+          PY
+
+          {
+            echo "Purpose: rollback safety image for current pre-v5 N60 Pro system"
+            echo "Builder commit: $GITHUB_SHA"
+            echo "PadavanOnly commit: $PADAVANONLY_COMMIT"
+            echo "Kernel: 6.6.95"
+            echo "Target: netcore_n60-pro"
+            echo "Feeds:"
+            echo "  packages: $PACKAGES_FEED"
+            echo "  luci: $LUCI_FEED"
+            echo "  routing: $ROUTING_FEED"
+            echo "  telephony: $TELEPHONY_FEED"
+            echo "Image: $(basename "$IMAGE")"
+            echo "NOTE: This is a reconstructed rollback image, not a byte-identical copy of the originally flashed image."
+            echo
+            sha256sum "$IMAGE"
+          } | tee "$OUT/ROLLBACK-BUILD-INFO.txt"
+
+      - name: Upload verified rollback firmware
+        if: ${{ success() && steps.verify.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: netcore-n60-pro-rollback-6.6.95-${{ github.run_number }}
+          path: |
+            immortalwrt/bin/targets/mediatek/filogic/immortalwrt-mediatek-filogic-netcore_n60-pro-squashfs-sysupgrade.bin
+            immortalwrt/bin/targets/mediatek/filogic/immortalwrt-mediatek-filogic-netcore_n60-pro.manifest
+            immortalwrt/bin/targets/mediatek/filogic/profiles.json
+            immortalwrt/bin/targets/mediatek/filogic/sha256sums
+            immortalwrt/bin/targets/mediatek/filogic/*.buildinfo
+            immortalwrt/bin/targets/mediatek/filogic/ROLLBACK-BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload rollback diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-6.6.95-diagnostics-${{ github.run_number }}
+          include-hidden-files: true
+          path: |
+            immortalwrt/.config
+            immortalwrt/feeds.conf.default
+            immortalwrt/bin/targets/mediatek/filogic/*.manifest
+            immortalwrt/bin/targets/mediatek/filogic/profiles.json
+            immortalwrt/bin/targets/mediatek/filogic/sha256sums
+            immortalwrt/bin/targets/mediatek/filogic/*.buildinfo
+            rollback-build.log
+          if-no-files-found: ignore
+          retention-days: 30
