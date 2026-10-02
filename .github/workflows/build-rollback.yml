@@ -21,6 +21,10 @@ env:
   TELEPHONY_FEED: 11e9c73bff6be34ff2fdcd4bc0e81a4723d78652
   OPENCLASH_REPO: https://github.com/vernesong/OpenClash.git
   OPENCLASH_REF: be0c3d51ccddc582ffbdfbbbb4d461a1be1b4d41
+  ARGON_THEME_REPO: https://github.com/jerrykuku/luci-theme-argon.git
+  ARGON_THEME_REF: e0188ed05b23986da5e3cc5fbefd1a8b0e596fd0
+  ARGON_CONFIG_REPO: https://github.com/jerrykuku/luci-app-argon-config.git
+  ARGON_CONFIG_REF: f22e7cfec363b5c3c7fce1fe476924464cd30e1a
 
 jobs:
   rollback:
@@ -101,6 +105,35 @@ jobs:
           rm -rf "$TMP_OPENCLASH"
           echo "OPENCLASH_COMMIT=$RESOLVED" >> "$GITHUB_ENV"
           test -f package/luci-app-openclash/Makefile
+
+      - name: Import historical Argon packages
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+
+          import_package() {
+            local repo="$1" ref="$2" dest="$3" env_name="$4"
+            local tmp resolved
+            tmp="$(mktemp -d)"
+            git -C "$tmp" init -q
+            git -C "$tmp" remote add origin "$repo"
+            git -C "$tmp" fetch --depth 1 origin "$ref"
+            git -C "$tmp" checkout --detach FETCH_HEAD
+            resolved="$(git -C "$tmp" rev-parse HEAD)"
+            test "$resolved" = "$ref"
+            test -f "$tmp/Makefile"
+            rm -rf "$dest"
+            cp -a "$tmp" "$dest"
+            rm -rf "$dest/.git" "$tmp"
+            echo "$env_name=$resolved" >> "$GITHUB_ENV"
+            test -f "$dest/Makefile"
+          }
+
+          import_package "$ARGON_THEME_REPO" "$ARGON_THEME_REF" \
+            package/luci-theme-argon ARGON_THEME_COMMIT
+          import_package "$ARGON_CONFIG_REPO" "$ARGON_CONFIG_REF" \
+            package/luci-app-argon-config ARGON_CONFIG_COMMIT
 
       - name: Prepare rollback N60 Pro config
         shell: bash
@@ -326,6 +359,8 @@ jobs:
             echo "  telephony: $TELEPHONY_FEED"
             echo "OpenClash commit: $OPENCLASH_COMMIT"
             echo "OpenClash version: 0.46.102"
+            echo "Argon theme commit: $ARGON_THEME_COMMIT"
+            echo "Argon config commit: $ARGON_CONFIG_COMMIT"
             echo "Image: $(basename "$IMAGE")"
             echo "NOTE: This is a reconstructed rollback image, not a byte-identical copy of the originally flashed image."
             echo
