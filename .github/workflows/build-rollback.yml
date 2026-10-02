@@ -87,6 +87,30 @@ jobs:
             echo "$f $(git -C feeds/$f rev-parse HEAD)"
           done
 
+      - name: Apply Rust 1.89 GitHub Actions compatibility fix
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          RUST_MK=feeds/packages/lang/rust/Makefile
+          grep -Fx 'PKG_VERSION:=1.89.0' "$RUST_MK"
+          python3 - "$RUST_MK" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          lines = path.read_text().splitlines()
+          slash = chr(92)
+          xpy = "\t$(PYTHON) $(HOST_BUILD_DIR)/x.py " + slash
+          build_dir = "\t\t--build-dir $(HOST_BUILD_DIR)/build " + slash
+          assert xpy in lines, "Rust x.py invocation not found"
+          index = lines.index(xpy)
+          assert lines[index + 1] == build_dir, "unexpected Rust host build layout"
+          lines.insert(index + 1, "\t\t--ci false " + slash)
+          path.write_text("\n".join(lines) + "\n")
+          PY
+          grep -F -- '--ci false' "$RUST_MK"
+
       - name: Import historical OpenClash package
         shell: bash
         working-directory: ${{ env.SOURCE_DIR }}
