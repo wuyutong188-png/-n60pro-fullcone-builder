@@ -19,6 +19,8 @@ env:
   LUCI_FEED: 85db8333ee9661f31e999b52bbbe4804d5e7dab8
   ROUTING_FEED: 3eb59e9471858c83891979793f1dd29cca156919
   TELEPHONY_FEED: 11e9c73bff6be34ff2fdcd4bc0e81a4723d78652
+  OPENCLASH_REPO: https://github.com/vernesong/OpenClash.git
+  OPENCLASH_REF: be0c3d51ccddc582ffbdfbbbb4d461a1be1b4d41
 
 jobs:
   rollback:
@@ -80,6 +82,25 @@ jobs:
           for f in packages luci routing telephony; do
             echo "$f $(git -C feeds/$f rev-parse HEAD)"
           done
+
+      - name: Import historical OpenClash package
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          TMP_OPENCLASH="$(mktemp -d)"
+          git -C "$TMP_OPENCLASH" init -q
+          git -C "$TMP_OPENCLASH" remote add origin "$OPENCLASH_REPO"
+          git -C "$TMP_OPENCLASH" fetch --depth 1 origin "$OPENCLASH_REF"
+          git -C "$TMP_OPENCLASH" checkout --detach FETCH_HEAD
+          RESOLVED="$(git -C "$TMP_OPENCLASH" rev-parse HEAD)"
+          test "$RESOLVED" = "$OPENCLASH_REF"
+          grep -Fx 'PKG_VERSION:=0.46.102' "$TMP_OPENCLASH/luci-app-openclash/Makefile"
+          rm -rf package/luci-app-openclash
+          cp -a "$TMP_OPENCLASH/luci-app-openclash" package/luci-app-openclash
+          rm -rf "$TMP_OPENCLASH"
+          echo "OPENCLASH_COMMIT=$RESOLVED" >> "$GITHUB_ENV"
+          test -f package/luci-app-openclash/Makefile
 
       - name: Prepare rollback N60 Pro config
         shell: bash
@@ -303,6 +324,8 @@ jobs:
             echo "  luci: $LUCI_FEED"
             echo "  routing: $ROUTING_FEED"
             echo "  telephony: $TELEPHONY_FEED"
+            echo "OpenClash commit: $OPENCLASH_COMMIT"
+            echo "OpenClash version: 0.46.102"
             echo "Image: $(basename "$IMAGE")"
             echo "NOTE: This is a reconstructed rollback image, not a byte-identical copy of the originally flashed image."
             echo
